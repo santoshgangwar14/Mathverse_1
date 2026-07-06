@@ -71,6 +71,8 @@ export interface IMediaService {
   playSpeechPhrase(text: string, rate?: number): Promise<void>;
   stopSpeech(): void;
   isAudioInitialized(): boolean;
+  addPhonemeListener(listener: (phoneme: 'a' | 'o' | 'e' | 'i' | 'consonant' | 'idle') => void): void;
+  removePhonemeListener(listener: (phoneme: 'a' | 'o' | 'e' | 'i' | 'consonant' | 'idle') => void): void;
 }
 
 // ============================================================================
@@ -864,6 +866,7 @@ export class MediaService implements IMediaService {
   private panner: StereoPannerNode | null = null;
   private activeTimeouts: any[] = [];
   private activeOscillators: any[] = [];
+  private phonemeListeners: ((phoneme: 'a' | 'o' | 'e' | 'i' | 'consonant' | 'idle') => void)[] = [];
 
   getPlaybackSpeed(): number {
     return this.speed;
@@ -871,6 +874,22 @@ export class MediaService implements IMediaService {
 
   setPlaybackSpeed(speed: number): void {
     this.speed = speed;
+  }
+
+  addPhonemeListener(listener: (phoneme: 'a' | 'o' | 'e' | 'i' | 'consonant' | 'idle') => void): void {
+    this.phonemeListeners.push(listener);
+  }
+
+  removePhonemeListener(listener: (phoneme: 'a' | 'o' | 'e' | 'i' | 'consonant' | 'idle') => void): void {
+    this.phonemeListeners = this.phonemeListeners.filter(l => l !== listener);
+  }
+
+  private notifyPhoneme(phoneme: 'a' | 'o' | 'e' | 'i' | 'consonant' | 'idle'): void {
+    this.phonemeListeners.forEach(listener => {
+      try {
+        listener(phoneme);
+      } catch (e) {}
+    });
   }
 
   isAudioInitialized(): boolean {
@@ -950,6 +969,8 @@ export class MediaService implements IMediaService {
     this.initAudio();
     if (!this.ctx || !this.compressor) return;
 
+    this.notifyPhoneme(vowelType);
+
     const now = this.ctx.currentTime;
     
     // Create fundamental frequency (F0) oscillator for Indian female pitch profile (~210Hz)
@@ -1025,9 +1046,11 @@ export class MediaService implements IMediaService {
     this.activeOscillators.push(oscF0);
 
     // Cleanup reference after it finishes
-    setTimeout(() => {
+    const finishTimeout = setTimeout(() => {
       this.activeOscillators = this.activeOscillators.filter(o => o !== oscF0);
-    }, (duration + 0.1) * 1000);
+      this.notifyPhoneme('idle');
+    }, (duration + 0.05) * 1000);
+    this.activeTimeouts.push(finishTimeout);
   }
 
   /**
@@ -1080,6 +1103,8 @@ export class MediaService implements IMediaService {
   }
 
   stopSpeech(): void {
+    this.notifyPhoneme('idle');
+
     // Clear timeouts
     this.activeTimeouts.forEach(clearTimeout);
     this.activeTimeouts = [];

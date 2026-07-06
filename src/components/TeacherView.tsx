@@ -4,6 +4,8 @@ import { Sparkles, MessageSquare, Volume2, VolumeX, RotateCcw } from 'lucide-rea
 import { TeacherState } from '../types';
 import TeacherAnimation from './TeacherAnimation';
 import { mediaService } from '../services/MockServices';
+// @ts-ignore
+import teacherPhoto from '../assets/images/teacher_aarya_1783336454228.jpg';
 
 interface TeacherViewProps {
   teacherState: TeacherState;
@@ -56,6 +58,8 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
   const [isSpeaking, setIsSpeaking] = React.useState(false);
   const [voicesLoaded, setVoicesLoaded] = React.useState(false);
   const [userHasInteracted, setUserHasInteracted] = React.useState(false);
+  const speechTimeoutRef = React.useRef<any>(null);
+  const [avatarMode, setAvatarMode] = React.useState<'photo' | 'vector'>('vector');
 
   // Track user interaction to guide them to click and satisfy browser autoplay security policies
   React.useEffect(() => {
@@ -63,9 +67,19 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
     
     const handleInteraction = () => {
       setUserHasInteracted(true);
+      
+      // Crucial: Initialize and resume Web Audio API context during user gesture
+      try {
+        mediaService.initAudio();
+      } catch (err) {
+        console.warn('Web Audio init error:', err);
+      }
+      
       // Resume speechSynthesis if it got stuck paused by browser policy
-      if (window.speechSynthesis && window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
+      if (window.speechSynthesis) {
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
       }
     };
 
@@ -101,7 +115,7 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
     };
   }, []);
 
-  const speakText = React.useCallback((text: string, useFallbackVoice: boolean = false) => {
+  const speakText = React.useCallback((text: string, useFallbackVoice: boolean = false, forcePlay: boolean = false) => {
     if (typeof window === 'undefined' || !window.speechSynthesis) return;
     
     // Always cancel ongoing speech first to clear queue
@@ -109,7 +123,19 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
     mediaService.stopSpeech();
     setIsSpeaking(false);
 
+    if (speechTimeoutRef.current) {
+      clearTimeout(speechTimeoutRef.current);
+      speechTimeoutRef.current = null;
+    }
+
     if (isMuted || !text) return;
+
+    // VERY IMPORTANT: Defer automatic speech synthesis until the first user interaction 
+    // to prevent browsers from permanently locking the Web Speech queue
+    if (!userHasInteracted && !forcePlay) {
+      console.log('Speech synthesis deferred until user interaction.');
+      return;
+    }
 
     // Ensure the synthesis engine is unpaused
     if (window.speechSynthesis.paused) {
@@ -125,9 +151,25 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
     if (!cleanText) return;
 
     // Trigger our spatial Web Audio API vocal engine to complement the narration
-    mediaService.initAudio();
-    mediaService.setSpatialPosition(-0.45); // Standing at the left podium
-    mediaService.playSpeechPhrase(cleanText, 0.92);
+    try {
+      mediaService.initAudio();
+      mediaService.setSpatialPosition(-0.45); // Standing at the left podium
+      mediaService.playSpeechPhrase(cleanText, 0.92);
+    } catch (err) {
+      console.warn('MediaService playSpeechPhrase error:', err);
+    }
+
+    // Activate mouth movement animation immediately so it's fully responsive to speech
+    setIsSpeaking(true);
+
+    // Calculate estimated talking duration as a safety fallback in case speechSynthesis events stall
+    const wordsCount = cleanText.split(/\s+/).length;
+    const estimatedDurationMs = Math.max(1800, (wordsCount * 460) + 1200);
+
+    speechTimeoutRef.current = setTimeout(() => {
+      setIsSpeaking(false);
+      mediaService.stopSpeech();
+    }, estimatedDurationMs);
 
     const utterance = new SpeechSynthesisUtterance(cleanText);
     
@@ -151,33 +193,48 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
     utterance.onend = () => {
       setIsSpeaking(false);
       mediaService.stopSpeech();
+      if (speechTimeoutRef.current) {
+        clearTimeout(speechTimeoutRef.current);
+        speechTimeoutRef.current = null;
+      }
     };
 
     utterance.onerror = (e) => {
       console.warn('SpeechSynthesis error:', e);
-      setIsSpeaking(false);
-      mediaService.stopSpeech();
-      
-      // If first attempt failed and we weren't already using fallback, try once with the system default voice
-      if (!useFallbackVoice && e.error !== 'interrupted') {
-        setTimeout(() => {
-          speakText(text, true);
-        }, 100);
+      // Don't stop immediately if the speech was interrupted by a new step
+      if (e.error !== 'interrupted') {
+        setIsSpeaking(false);
+        mediaService.stopSpeech();
+        if (speechTimeoutRef.current) {
+          clearTimeout(speechTimeoutRef.current);
+          speechTimeoutRef.current = null;
+        }
+
+        // Try once with system default voice if first attempt failed and we weren't already using fallback
+        if (!useFallbackVoice) {
+          setTimeout(() => {
+            speakText(text, true, forcePlay);
+          }, 100);
+        }
       }
     };
 
-    window.speechSynthesis.speak(utterance);
+    try {
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.warn('Failed to call speak():', err);
+    }
     
     // Web Speech API buggy resume trigger for Chrome/Safari
     const resumeInterval = setInterval(() => {
-      if (window.speechSynthesis.speaking) {
+      if (window.speechSynthesis && window.speechSynthesis.speaking) {
         window.speechSynthesis.resume();
       } else {
         clearInterval(resumeInterval);
       }
     }, 1000);
 
-  }, [isMuted]);
+  }, [isMuted, userHasInteracted]);
 
   // Run a short, friendly voice check
   const playTestSound = () => {
@@ -187,19 +244,29 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
         localStorage.setItem('mathverse_teacher_muted', 'false');
       } catch {}
     }
+    setUserHasInteracted(true);
+    try {
+      mediaService.initAudio();
+    } catch {}
     setTimeout(() => {
-      speakText("Namaste! My voice is working perfectly. Let's begin our NCERT math lesson today!");
+      speakText("Namaste! My voice is working perfectly. Let's begin our NCERT math lesson today!", false, true);
     }, 100);
   };
 
   // Handle auto-speak on step changes
   React.useEffect(() => {
+    // Only speak automatically once the user has interacted to satisfy browser safety standards
+    if (!userHasInteracted) return;
+
     const timer = setTimeout(() => {
       speakText(speechText);
     }, 200);
 
     return () => {
       clearTimeout(timer);
+      if (speechTimeoutRef.current) {
+        clearTimeout(speechTimeoutRef.current);
+      }
       if (typeof window !== 'undefined') {
         if (window.speechSynthesis) {
           window.speechSynthesis.cancel();
@@ -207,7 +274,7 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
         mediaService.stopSpeech();
       }
     };
-  }, [speechText, speakText, voicesLoaded]);
+  }, [speechText, speakText, voicesLoaded, userHasInteracted]);
 
   const toggleMute = () => {
     setIsMuted(prev => {
@@ -248,8 +315,8 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
             </div>
             <div className="flex-1">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5">
-                  A.I.R.A. Humanoid
+                <span className="text-xs font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5 font-sans">
+                  Aarya Mam
                   {isSpeaking && (
                     <span className="flex items-center gap-0.5 h-3 ml-1" title="Teacher is Speaking">
                       <motion.span animate={{ height: [4, 11, 4] }} transition={{ repeat: Infinity, duration: 0.4, ease: "easeInOut" }} className="w-0.5 bg-indigo-500 dark:bg-indigo-400 rounded-full" />
@@ -316,9 +383,99 @@ export default function TeacherView({ teacherState }: TeacherViewProps) {
         </motion.div>
       </AnimatePresence>
 
-      {/* Humanoid Robot Graphic Container */}
-      <div className="w-44 h-72 sm:w-56 sm:h-96 relative flex items-end overflow-visible">
-        <TeacherAnimation action={currentAction} emotion={emotion} facing={facing} isSpeaking={isSpeaking} />
+      {/* Teacher Avatar Container with Multi-Mode Toggle */}
+      <div className="w-44 h-72 sm:w-56 sm:h-96 relative flex flex-col justify-end items-center overflow-visible group/container">
+        {/* Toggle between Photorealistic Portrait and Interactive 2D Vector Avatar */}
+        <div className="absolute -top-10 left-1/2 -translate-x-1/2 z-20 flex bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-1 rounded-full border border-slate-200/80 dark:border-slate-800 shadow-lg text-[9px] font-bold text-slate-700 dark:text-slate-200 transition-all duration-300 pointer-events-auto whitespace-nowrap scale-95 hover:scale-100 opacity-90 group-hover/container:opacity-100">
+          <button 
+            type="button"
+            onClick={() => setAvatarMode('photo')}
+            className={`px-2.5 py-1 rounded-full transition-all cursor-pointer ${avatarMode === 'photo' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white'}`}
+          >
+            📸 Live Photo
+          </button>
+          <button 
+            type="button"
+            onClick={() => setAvatarMode('vector')}
+            className={`px-2.5 py-1 rounded-full transition-all cursor-pointer ${avatarMode === 'vector' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white'}`}
+          >
+            👤 2D Avatar
+          </button>
+        </div>
+
+        {avatarMode === 'photo' ? (
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full h-full rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-950 flex flex-col justify-end shadow-xl relative"
+          >
+            {/* Photorealistic Stream Background Image */}
+            <motion.img 
+              src={teacherPhoto} 
+              alt="Aarya Mam - NCERT Math Educator" 
+              className="absolute inset-0 w-full h-full object-cover object-center pointer-events-none"
+              referrerPolicy="no-referrer"
+              animate={
+                isSpeaking 
+                  ? { y: [0, -1.8, 0, -1.0, 0], scale: [1, 1.018, 1, 1.01, 1] } 
+                  : { y: [0, -3.0, 0], scale: [1, 1.005, 1] }
+              }
+              transition={{
+                repeat: Infinity,
+                duration: isSpeaking ? 1.8 : 3.5,
+                ease: "easeInOut"
+              }}
+            />
+            
+            {/* Vignette & Gradient Shadows over the photo */}
+            <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-80 pointer-events-none" />
+            
+            {/* Dynamic Status / Floating Indicator */}
+            <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-slate-950/70 backdrop-blur-md px-2 py-0.5 rounded-full border border-white/10 text-[8px] font-bold text-white uppercase tracking-wider">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Live Feed
+            </div>
+
+            {/* Speaking Status Tag */}
+            {isSpeaking && (
+              <div className="absolute top-2 right-2 flex items-center gap-1 bg-indigo-600/90 backdrop-blur-sm px-2 py-0.5 rounded-full text-[8px] font-bold text-white uppercase tracking-wider shadow-sm animate-bounce">
+                Speaking
+              </div>
+            )}
+
+            {/* Live Audio Waveform Overlay at bottom of the photo */}
+            <div className="absolute inset-x-0 bottom-0 bg-slate-950/85 backdrop-blur-md px-3.5 py-2.5 border-t border-white/10 flex flex-col gap-1 z-10">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-300 tracking-wider uppercase font-sans">
+                  Aarya Mam
+                </span>
+                <span className="text-[9px] font-mono font-bold text-indigo-400 bg-indigo-950/50 px-1.5 py-0.5 rounded border border-indigo-900/40">
+                  {isSpeaking ? "AUDIO ACTIVE" : "IDLE"}
+                </span>
+              </div>
+              
+              {/* Audio spectrum bar waves */}
+              <div className="flex items-end gap-1 h-3.5 mt-0.5">
+                {Array.from({ length: 18 }).map((_, i) => (
+                  <motion.span
+                    key={i}
+                    animate={{
+                      height: isSpeaking ? [3, Math.random() * 12 + 3, 3] : 3
+                    }}
+                    transition={{
+                      repeat: Infinity,
+                      duration: 0.25 + Math.random() * 0.35,
+                      ease: "easeInOut"
+                    }}
+                    className="flex-1 bg-gradient-to-t from-indigo-500 via-indigo-400 to-sky-300 rounded-full"
+                  />
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        ) : (
+          <TeacherAnimation action={currentAction} emotion={emotion} facing={facing} isSpeaking={isSpeaking} />
+        )}
       </div>
     </div>
   );
